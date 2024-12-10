@@ -144,6 +144,12 @@ pub struct Tlhelp32Snapshot {
     pub threads: Box<dyn ResettableIterator<Item = ThreadEntry> + Send>,
 }
 
+pub struct DebugEvent {
+
+}
+
+pub type WaitForDebugEventCb = Box<dyn FnOnce(DebugEvent)>;
+
 pub trait CeServer {
     fn get_version_string(&self) -> String;
 
@@ -219,4 +225,10 @@ pub trait CeServer {
     ) -> Result<CeHandle>;
 
     fn is_android(&self) -> bool;
+
+    fn start_debug(&self, process_handle: CeHandle) -> Result<()>;
+
+    fn wait_for_debug_event(&self, process_handle: CeHandle, timeout: u32, cb: WaitForDebugEventCb) -> Result<()>;
 }
+
+// TODO: write tests

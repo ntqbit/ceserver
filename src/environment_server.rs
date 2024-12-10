@@ -3,6 +3,8 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
+use anyhow::anyhow;
+
 use crate::{
     defs::{CeAbi, CeArch, Protection, Th32Flags},
     environment::{EnvAbi, EnvArch, EnvError, Environment, FindRegionsFlags, Process, Thread},
@@ -10,7 +12,7 @@ use crate::{
     server::{
         self, CeHandle, CeOption, CeOptionDescription, CeProcessId, CeServer, ModuleEntry,
         ProcessEntry, RegionInfo, ResettableIterator, ServerError, ThreadEntry, Tlhelp32Snapshot,
-        VirtualQueryExFullFlags, CE_OPTIONS,
+        VirtualQueryExFullFlags, WaitForDebugEventCb, CE_OPTIONS,
     },
 };
 
@@ -237,7 +239,7 @@ impl CeServer for EnvironmentServer {
         process
             .change_memory_protection(base, size as u64, protection)
             .map_err(|err| ServerError::Other(anyhow::Error::new(err)))?;
-        
+
         Ok(())
     }
 
@@ -477,6 +479,22 @@ impl CeServer for EnvironmentServer {
             .write()
             .unwrap()
             .open(Resource::Thread(thread)))
+    }
+
+    fn start_debug(&self, _process_handle: CeHandle) -> server::Result<()> {
+        // TODO: implement
+        Err(server::ServerError::Other(anyhow!(
+            "could not start debugger"
+        )))
+    }
+
+    fn wait_for_debug_event(
+        &self,
+        _process_handle: CeHandle,
+        _timeout: u32,
+        _cb: WaitForDebugEventCb,
+    ) -> server::Result<()> {
+        Ok(())
     }
 }
 

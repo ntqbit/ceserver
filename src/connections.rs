@@ -236,6 +236,8 @@ impl StreamConnection {
     pub async fn handle_command(&mut self, command: defs::Command) -> anyhow::Result<()> {
         match command {
             defs::Command::GETVERSION => {
+                log::debug!("GETVERSION");
+
                 let version_string = self.server.get_version_string();
                 let version_number = self.protocol_version.version_number();
 
@@ -249,12 +251,16 @@ impl StreamConnection {
             }
             defs::Command::CLOSECONNECTION => todo!(),
             defs::Command::TERMINATESERVER => {
+                log::debug!("TERMINATESERVER");
+
                 self.server.terminate_server();
                 Ok(())
             }
             defs::Command::OPENPROCESS => {
                 let mut reader = Reader::new(self.read::<4>().await?);
                 let pid = reader.read_pid()?;
+
+                log::debug!("OPENPROCESS: pid={}", pid);
 
                 if let Some(handle) = self.server.open_process(pid).ok() {
                     let mut writer = Writer::new();
@@ -272,6 +278,8 @@ impl StreamConnection {
                 let mut reader = Reader::new(self.read::<4>().await?);
                 let handle = reader.read_handle()?;
 
+                log::debug!("CLOSEHANDLE: {}", handle,);
+
                 if self.server.close_handle(handle).is_ok() {
                     let mut writer = Writer::new();
                     writer.write_i32(1);
@@ -285,6 +293,8 @@ impl StreamConnection {
                 let mut reader = Reader::new(self.read::<12>().await?);
                 let handle = reader.read_handle()?;
                 let base = reader.read_address()?;
+
+                log::debug!("VIRTUALQUERYEX: handle={}, base=0x{:X}", handle, base);
 
                 let result = self.server.virtual_query(handle, base);
 
@@ -346,6 +356,13 @@ impl StreamConnection {
                 let base = res.read_address()?;
                 let size = res.read_u32()? as usize;
 
+                log::debug!(
+                    "WRITEPROCESSMEMORY: handle={}, base=0x{:X}, size=0x{:X}",
+                    process_handle,
+                    base,
+                    size
+                );
+
                 let mut success = false;
 
                 if size > 0 {
@@ -369,9 +386,57 @@ impl StreamConnection {
 
                 Ok(())
             }
-            defs::Command::STARTDEBUG => todo!(),
-            defs::Command::STOPDEBUG => todo!(),
-            defs::Command::WAITFORDEBUGEVENT => todo!(),
+            defs::Command::STARTDEBUG => {
+                let mut res = Reader::new(self.read::<4>().await?);
+                let process_handle = res.read_handle()?;
+
+                log::debug!("STARTDEBUG: handle={}", process_handle);
+
+                let success = self.server.start_debug(process_handle).is_ok();
+
+                let mut writer = Writer::new();
+                writer.write_u32(if success { 1 } else { 0 });
+
+                self.write(writer.as_bytes()).await?;
+                Ok(())
+            }
+            defs::Command::STOPDEBUG => unimplemented!("not implemented by ceserver"),
+            defs::Command::WAITFORDEBUGEVENT => {
+                let mut res = Reader::new(self.read::<8>().await?);
+                let process_handle = res.read_handle()?;
+                let timeout = res.read_u32()?;
+
+                log::debug!(
+                    "WAITFORDEBUGEVENT: handle={}, timeout={}",
+                    process_handle,
+                    timeout
+                );
+
+                self.server
+                    .wait_for_debug_event(
+                        process_handle,
+                        timeout,
+                        Box::new(|_de| {
+                            // TODO: send debug event to the client.
+
+                            // Use Weak point to the connection.
+
+                            // Since connection is async, we need to somehow enter an async block to send the data.
+                            // Making the callback async is undesirable, since it would require the server
+                            // to run a async task to execute it, loading the server with another dependency.
+                            // So it's better to have a simple, synchronous callback.
+
+                            // In the callback we should spawn an async task to send the data.
+                            // Don't use tokio::spawn directly, instead use dependency injection,
+                            // allowing the user decide how to spawn a task.
+
+                            todo!();
+                        }),
+                    )
+                    .map_err(|e| anyhow!("wait_for_debug_event error: {}", e))?;
+
+                Ok(())
+            }
             defs::Command::CONTINUEFROMDEBUGEVENT => todo!(),
             defs::Command::SETBREAKPOINT => todo!(),
             defs::Command::REMOVEBREAKPOINT => todo!(),
@@ -520,6 +585,8 @@ impl StreamConnection {
                 let handle = reader.read_handle()?;
                 let flags = VirtualQueryExFullFlags::from_bits(reader.read_byte()?)
                     .ok_or_else(|| anyhow!("invalid VirtualQueryExFull flags"))?;
+
+                log::debug!("VIRTUALQUERYEXFULL: handle={}, flags={:?}", handle, flags);
 
                 let regions = self.server.virtual_query_full(handle, flags)?;
 
@@ -730,3 +797,5 @@ impl StreamConnection {
         Ok(())
     }
 }
+
+// TODO: write tests
