@@ -1,6 +1,7 @@
 use std::io::{self, Cursor};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use serde::{ser::SerializeTupleStruct, Serialize};
 
 use crate::server::{CeAddress, CeHandle, CeProcessId};
 
@@ -112,3 +113,73 @@ impl Writer {
         self.write_u64(address);
     }
 }
+
+pub struct BytesVariant<const N: usize>(Vec<u8>);
+
+impl<const N: usize> From<String> for BytesVariant<N> {
+    fn from(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+}
+
+impl<const N: usize> From<&str> for BytesVariant<N> {
+    fn from(value: &str) -> Self {
+        value.to_string().into()
+    }
+}
+
+macro_rules! impl_bytes_variant {
+    ($n:literal, $t:ty) => {
+        impl Serialize for BytesVariant<$n> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                if self.0.len() > <$t>::MAX as usize {
+                    return Err(serde::ser::Error::custom(
+                        "bytes' length does not fit in type",
+                    ));
+                }
+
+                let mut s = serializer.serialize_tuple_struct("", 2)?;
+                s.serialize_field(&(self.0.len() as $t))?;
+                s.serialize_field(&self.0)?;
+                s.end()
+            }
+        }
+    };
+}
+
+impl_bytes_variant!(8, u8);
+impl_bytes_variant!(16, u16);
+impl_bytes_variant!(32, u32);
+
+pub type Bytes8 = BytesVariant<8>;
+pub type Bytes16 = BytesVariant<16>;
+pub type Bytes32 = BytesVariant<32>;
+
+#[derive(Serialize)]
+pub struct GetVersionResponse {
+    pub version_number: i32,
+    pub version_string: Bytes8,
+}
+
+impl GetVersionResponse {
+    pub fn new(version_number: i32, version_string: String) -> Self {
+        Self {
+            version_number,
+            version_string: version_string.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct EmptyResponse;
+
+impl EmptyResponse {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+pub type TerminateServerResponse = EmptyResponse;

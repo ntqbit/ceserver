@@ -2,11 +2,14 @@ use std::borrow::Cow;
 
 use anyhow::anyhow;
 
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     defs::{self, CeArch, Protection, Th32Flags},
-    messages::{Reader, Writer},
+    messages::{
+        serialize, EmptyResponse, GetVersionResponse, Reader, TerminateServerResponse, Writer,
+    },
     server::{CeServer, ModuleEntry, VirtualQueryExFullFlags},
 };
 
@@ -103,7 +106,7 @@ where
         Ok(buf)
     }
 
-    async fn write(&mut self, buf: &[u8]) -> anyhow::Result<()> {
+    async fn write_raw(&mut self, buf: &[u8]) -> anyhow::Result<()> {
         self.writer.write_all(buf).await?;
 
         if buf.len() < 0x100 {
@@ -113,6 +116,10 @@ where
         }
 
         Ok(())
+    }
+
+    async fn respond<T: Serialize>(&mut self, value: T) -> anyhow::Result<()> {
+        self.write_raw(&serialize(&value)?).await
     }
 
     pub async fn serve_once(&mut self) -> anyhow::Result<()> {
@@ -135,23 +142,19 @@ where
             defs::Command::GETVERSION => {
                 log::debug!("GETVERSION");
 
-                let version_string = self.server.get_version_string();
-                let version_number = self.protocol_version.version_number();
-
-                let mut writer = Writer::new();
-
-                writer.write_i32(version_number);
-                writer.write_bytes8(version_string.as_bytes());
-
-                self.write(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(GetVersionResponse::new(
+                    self.protocol_version.version_number(),
+                    self.server.get_version_string(),
+                ))
+                .await
             }
             defs::Command::CLOSECONNECTION => todo!(),
             defs::Command::TERMINATESERVER => {
                 log::debug!("TERMINATESERVER");
 
                 self.server.terminate_server();
-                Ok(())
+
+                self.respond(TerminateServerResponse::new()).await
             }
             defs::Command::OPENPROCESS => {
                 let mut reader = Reader::new(self.read::<4>().await?);
@@ -162,7 +165,7 @@ where
                 if let Some(handle) = self.server.open_process(pid).ok() {
                     let mut writer = Writer::new();
                     writer.write_handle(handle);
-                    self.write(writer.as_bytes()).await?;
+                    self.write_raw(writer.as_bytes()).await?;
                     Ok(())
                 } else {
                     Err(anyhow!("process not found"))
@@ -180,7 +183,7 @@ where
                 if self.server.close_handle(handle).is_ok() {
                     let mut writer = Writer::new();
                     writer.write_i32(1);
-                    self.write(writer.as_bytes()).await?;
+                    self.write_raw(writer.as_bytes()).await?;
                     Ok(())
                 } else {
                     Err(anyhow!("invalid handle"))
@@ -214,7 +217,7 @@ where
                     }
                 }
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::READPROCESSMEMORY => {
@@ -244,7 +247,7 @@ where
                 let mut writer = Writer::new();
                 writer.write_bytes32(&bytes);
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::WRITEPROCESSMEMORY => {
@@ -279,7 +282,7 @@ where
                 let mut writer = Writer::new();
                 writer.write_u32(if success { 1 } else { 0 });
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
 
                 Ok(())
             }
@@ -294,7 +297,7 @@ where
                 let mut writer = Writer::new();
                 writer.write_u32(if success { 1 } else { 0 });
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::STOPDEBUG => unimplemented!("not implemented by ceserver"),
@@ -351,7 +354,7 @@ where
 
                 let mut writer = Writer::new();
                 writer.write_byte(architecture as u8);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::MODULE32FIRST => todo!(),
@@ -382,7 +385,7 @@ where
                 // TODO: implement
                 let mut writer = Writer::new();
                 writer.write_u64(0);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
 
                 Ok(())
             }
@@ -413,7 +416,7 @@ where
 
                 let mut writer = Writer::new();
                 writer.write_address(result);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
 
                 Ok(())
             }
@@ -440,7 +443,7 @@ where
 
                 let mut writer = Writer::new();
                 writer.write_u32(result);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
 
                 Ok(())
             }
@@ -471,7 +474,7 @@ where
 
                 let mut writer = Writer::new();
                 writer.write_handle(handle);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
 
                 Ok(())
             }
@@ -499,14 +502,14 @@ where
                     writer.write_u32(region.mem_type.bits());
                 }
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::GETREGIONINFO => todo!(),
             defs::Command::GETABI => {
                 let mut writer = Writer::new();
                 writer.write_byte(self.server.get_abi() as u8);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::SET_CONNECTION_NAME => {
@@ -578,7 +581,7 @@ where
                     writer.write_handle(handle);
                 }
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::CHANGEMEMORYPROTECTION => {
@@ -609,7 +612,7 @@ where
                 let mut writer = Writer::new();
                 writer.write_i32(result);
                 writer.write_u32(0);
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
 
                 Ok(())
             }
@@ -633,7 +636,7 @@ where
                     writer.write_i32(option.option_type as i32);
                 }
 
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::GETOPTIONVALUE => todo!(),
@@ -647,7 +650,7 @@ where
                 let mut writer = Writer::new();
                 let is_android = self.server.is_android();
                 writer.write_byte(if is_android { 1 } else { 0 });
-                self.write(writer.as_bytes()).await?;
+                self.write_raw(writer.as_bytes()).await?;
                 Ok(())
             }
             defs::Command::LOADMODULEEX => todo!(),
@@ -690,7 +693,7 @@ where
             }
         }
 
-        self.write(writer.as_bytes()).await?;
+        self.write_raw(writer.as_bytes()).await?;
         Ok(())
     }
 }
