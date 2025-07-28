@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::defs::{CeAbi, CeArch, MemoryType, Protection, Th32Flags};
 use bitflags::bitflags;
+use blanket::blanket;
 use strum::Display;
 
 pub const CE_VERSION_STRING: &str = "CHEATENGINE Network 2.2";
@@ -150,6 +151,7 @@ pub struct DebugEvent {}
 
 pub type WaitForDebugEventCb = Box<dyn FnOnce(DebugEvent)>;
 
+#[blanket(derive(Arc))]
 pub trait CeServer {
     fn get_version_string(&self) -> String;
 

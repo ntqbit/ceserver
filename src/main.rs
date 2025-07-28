@@ -34,14 +34,14 @@ pub async fn main() -> anyhow::Result<()> {
         stream.set_nodelay(true).unwrap();
 
         log::info!("Client connected from {}", sockaddr);
-        let connection_id = sockaddr.to_string();
+        let client_address = sockaddr.to_string();
 
-        let mut client = StreamConnection::new(
-            Box::new(stream),
-            server.clone(),
-            ProtocolVersion::Ver5,
-            Some(connection_id),
-        );
+        let (reader, writer) = stream.into_split();
+
+        let mut client =
+            StreamConnection::new(reader, writer, server.clone(), ProtocolVersion::Ver5);
+
+        client.set_connection_id(Cow::Owned(client_address));
 
         tokio::spawn(async move {
             let result = client.serve().await;

@@ -1,4 +1,7 @@
-use std::{borrow::Cow, pin::Pin, sync::Arc};
+use std::{
+    borrow::Cow,
+    pin::{pin, Pin},
+};
 
 use anyhow::anyhow;
 
@@ -51,40 +54,41 @@ impl ProtocolVersion {
     }
 }
 
-pub trait Stream: AsyncRead + AsyncWrite {}
-
-impl Stream for TcpStream {}
-
-pub struct StreamConnection {
+pub struct StreamConnection<R, W, S> {
+    reader: R,
+    writer: W,
+    server: S,
     protocol_version: ProtocolVersion,
-    stream: Pin<Box<dyn Stream + Send>>,
-    server: Arc<dyn CeServer + Send + Sync>,
     connection_name: Cow<'static, str>,
     connection_id: Cow<'static, str>,
 }
 
-impl StreamConnection {
+impl<R, W, S> StreamConnection<R, W, S> {
     const INITIAL_CONNECTION_NAME: &str = "*";
     const DEFAULT_CONNECTION_ID: &str = "*";
 
-    pub fn new(
-        stream: Box<dyn Stream + Send>,
-        server: Arc<dyn CeServer + Send + Sync>,
-        protocol_version: ProtocolVersion,
-        // An optional connection identifier string that is used solely for logging or other diagnostics.
-        connection_id: Option<String>,
-    ) -> Self {
+    pub fn new(reader: R, writer: W, server: S, protocol_version: ProtocolVersion) -> Self {
         Self {
-            stream: Box::into_pin(stream),
+            reader,
+            writer,
             server,
             connection_name: Cow::Borrowed(Self::INITIAL_CONNECTION_NAME),
-            connection_id: connection_id
-                .map(|x| Cow::Owned(x))
-                .unwrap_or(Cow::Borrowed(Self::DEFAULT_CONNECTION_ID)),
+            connection_id: Cow::Borrowed(Self::DEFAULT_CONNECTION_ID),
             protocol_version,
         }
     }
 
+    pub fn set_connection_id(&mut self, connection_id: Cow<'static, str>) {
+        self.connection_id = connection_id;
+    }
+}
+
+impl<R, W, S> StreamConnection<R, W, S>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    S: CeServer,
+{
     pub async fn serve(&mut self) -> anyhow::Result<()> {
         log::debug!("Start serving.");
 
@@ -94,7 +98,7 @@ impl StreamConnection {
     }
 
     async fn read_bytes(&mut self, buf: &mut [u8]) -> anyhow::Result<()> {
-        self.stream.read_exact(buf).await?;
+        self.reader.read_exact(buf).await?;
         log::trace!("Read: {:02X?}", buf);
         Ok(())
     }
@@ -106,7 +110,7 @@ impl StreamConnection {
     }
 
     async fn write(&mut self, buf: &[u8]) -> anyhow::Result<()> {
-        self.stream.write_all(buf).await?;
+        self.writer.write_all(buf).await?;
 
         if buf.len() < 0x100 {
             log::trace!("Written: {} {:X?}", buf.len(), buf);
@@ -701,7 +705,7 @@ impl StreamConnection {
 mod tests {
     use std::{
         io,
-        pin::{pin, Pin},
+        pin::Pin,
         sync::{Arc, Mutex},
         task::Poll,
     };
@@ -742,65 +746,15 @@ mod tests {
         }
     }
 
-    struct BufStream<'a> {
-        input: InputStream<'a>,
-        output: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl<'a> BufStream<'a> {
-        pub fn new(input: &'a [u8], output: Arc<Mutex<Vec<u8>>>) -> Self {
-            Self {
-                input: InputStream(io::Cursor::new(input)),
-                output,
-            }
-        }
-    }
-
-    impl<'a> super::AsyncRead for BufStream<'a> {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            pin!(&mut self.input).poll_read(cx, buf)
-        }
-    }
-
-    impl<'a> super::AsyncWrite for BufStream<'a> {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> Poll<Result<usize, io::Error>> {
-            pin!(&mut *self.output.lock().unwrap()).poll_write(cx, buf)
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> Poll<Result<(), io::Error>> {
-            pin!(&mut *self.output.lock().unwrap()).poll_flush(cx)
-        }
-
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> Poll<Result<(), io::Error>> {
-            pin!(&mut *self.output.lock().unwrap()).poll_shutdown(cx)
-        }
-    }
-
-    impl<'a> super::Stream for BufStream<'a> {}
-
     fn run_connection(
         input: &'static [u8],
-        server: Arc<dyn CeServer + Send + Sync>,
+        server: impl CeServer,
         protocol_version: ProtocolVersion,
     ) -> Vec<u8> {
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let stream = BufStream::new(input, Arc::clone(&output));
-        let mut connection =
-            StreamConnection::new(Box::new(stream), server, protocol_version, None);
+        let mut output = Vec::new();
+        let stream = InputStream(io::Cursor::new(input));
+        let reader = Pin::new(Box::new(stream));
+        let mut connection = StreamConnection::new(reader, &mut output, server, protocol_version);
 
         let _result = futures::executor::block_on(connection.serve())
             // It always returns an error.
@@ -808,14 +762,13 @@ mod tests {
 
         // TODO: check the result. it should return ConnectionReset.
 
-        let output = std::mem::take(&mut *output.lock().unwrap());
         output
     }
 
     fn test_input_output(
         input: &'static [u8],
         expected_output: &[u8],
-        server: Arc<dyn CeServer + Send + Sync>,
+        server: impl CeServer,
         protocol_version: ProtocolVersion,
     ) {
         let output = run_connection(input, server, protocol_version);
@@ -826,8 +779,8 @@ mod tests {
         );
     }
 
-    fn mock_server() -> Arc<dyn CeServer + Send + Sync> {
-        Arc::new(MockServer::new())
+    fn mock_server() -> impl CeServer {
+        MockServer::new()
     }
 
     struct MockServer {}
