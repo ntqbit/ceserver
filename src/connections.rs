@@ -1,14 +1,15 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Debug, io::Read};
 
 use anyhow::anyhow;
 
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     defs::{self, CeArch, Protection, Th32Flags},
     messages::{
-        serialize, EmptyResponse, GetVersionResponse, Reader, TerminateServerResponse, Writer,
+        deserialize, serialize, EmptyResponse, GetVersionResponse, OpenProcessRequest,
+        OpenProcessResponse, Reader, TerminateServerResponse, Writer,
     },
     server::{CeServer, ModuleEntry, VirtualQueryExFullFlags},
 };
@@ -100,10 +101,19 @@ where
         Ok(())
     }
 
-    async fn read<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
+    async fn read_raw<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
         let mut buf: [u8; N] = [0; N];
         self.read_bytes(&mut buf).await?;
         Ok(buf)
+    }
+
+    async fn read<T: Debug + DeserializeOwned>(&mut self) -> anyhow::Result<T> {
+        let mut buf = [0; 4096];
+        let length = self.reader.read(&mut buf).await?;
+        let data = &buf[..length];
+        let req = deserialize(data)?;
+        log::debug!("Request: {:?}", req);
+        Ok(req)
     }
 
     async fn write_raw(&mut self, buf: &[u8]) -> anyhow::Result<()> {
@@ -118,12 +128,14 @@ where
         Ok(())
     }
 
-    async fn respond<T: Serialize>(&mut self, value: T) -> anyhow::Result<()> {
+    async fn respond<T: Debug + Serialize>(&mut self, value: T) -> anyhow::Result<()> {
+        log::debug!("Response: {:?}", value);
+
         self.write_raw(&serialize(&value)?).await
     }
 
     pub async fn serve_once(&mut self) -> anyhow::Result<()> {
-        let Ok(command) = defs::Command::try_from(self.read::<1>().await?[0]) else {
+        let Ok(command) = defs::Command::try_from(self.read_raw::<1>().await?[0]) else {
             return Err(anyhow!("unknown command"));
         };
 
@@ -157,16 +169,10 @@ where
                 self.respond(TerminateServerResponse::new()).await
             }
             defs::Command::OPENPROCESS => {
-                let mut reader = Reader::new(self.read::<4>().await?);
-                let pid = reader.read_pid()?;
+                let req: OpenProcessRequest = self.read().await?;
 
-                log::debug!("OPENPROCESS: pid={}", pid);
-
-                if let Some(handle) = self.server.open_process(pid).ok() {
-                    let mut writer = Writer::new();
-                    writer.write_handle(handle);
-                    self.write_raw(writer.as_bytes()).await?;
-                    Ok(())
+                if let Some(process_handle) = self.server.open_process(req.process_id).ok() {
+                    self.respond(OpenProcessResponse { process_handle }).await
                 } else {
                     Err(anyhow!("process not found"))
                 }
@@ -175,7 +181,7 @@ where
             defs::Command::PROCESS32FIRST => Ok(self.process_next(true).await?),
             defs::Command::PROCESS32NEXT => Ok(self.process_next(false).await?),
             defs::Command::CLOSEHANDLE => {
-                let mut reader = Reader::new(self.read::<4>().await?);
+                let mut reader = Reader::new(self.read_raw::<4>().await?);
                 let handle = reader.read_handle()?;
 
                 log::debug!("CLOSEHANDLE: {}", handle,);
@@ -190,7 +196,7 @@ where
                 }
             }
             defs::Command::VIRTUALQUERYEX => {
-                let mut reader = Reader::new(self.read::<12>().await?);
+                let mut reader = Reader::new(self.read_raw::<12>().await?);
                 let handle = reader.read_handle()?;
                 let base = reader.read_address()?;
 
@@ -221,7 +227,7 @@ where
                 Ok(())
             }
             defs::Command::READPROCESSMEMORY => {
-                let mut reader = Reader::new(self.read::<17>().await?);
+                let mut reader = Reader::new(self.read_raw::<17>().await?);
                 let handle = reader.read_handle()?;
                 let base = reader.read_address()?;
                 let size = reader.read_u32()?;
@@ -251,7 +257,7 @@ where
                 Ok(())
             }
             defs::Command::WRITEPROCESSMEMORY => {
-                let mut res = Reader::new(self.read::<16>().await?);
+                let mut res = Reader::new(self.read_raw::<16>().await?);
                 let process_handle = res.read_handle()?;
                 let base = res.read_address()?;
                 let size = res.read_u32()? as usize;
@@ -287,7 +293,7 @@ where
                 Ok(())
             }
             defs::Command::STARTDEBUG => {
-                let mut res = Reader::new(self.read::<4>().await?);
+                let mut res = Reader::new(self.read_raw::<4>().await?);
                 let process_handle = res.read_handle()?;
 
                 log::debug!("STARTDEBUG: handle={}", process_handle);
@@ -302,7 +308,7 @@ where
             }
             defs::Command::STOPDEBUG => unimplemented!("not implemented by ceserver"),
             defs::Command::WAITFORDEBUGEVENT => {
-                let mut res = Reader::new(self.read::<8>().await?);
+                let mut res = Reader::new(self.read_raw::<8>().await?);
                 let process_handle = res.read_handle()?;
                 let timeout = res.read_u32()?;
 
@@ -345,7 +351,7 @@ where
             defs::Command::GETTHREADCONTEXT => todo!(),
             defs::Command::SETTHREADCONTEXT => todo!(),
             defs::Command::GETARCHITECTURE => {
-                let mut reader = Reader::new(self.read::<4>().await?);
+                let mut reader = Reader::new(self.read_raw::<4>().await?);
                 let handle = reader.read_handle()?;
                 let architecture = self
                     .server
@@ -360,7 +366,7 @@ where
             defs::Command::MODULE32FIRST => todo!(),
             defs::Command::MODULE32NEXT => todo!(),
             defs::Command::GETSYMBOLLISTFROMFILE => {
-                let mut reader = Reader::new(self.read::<8>().await?);
+                let mut reader = Reader::new(self.read_raw::<8>().await?);
 
                 let fileoffset = if self.protocol_version.has_module_fileoffset() {
                     reader.read_u32()?
@@ -391,7 +397,7 @@ where
             }
             defs::Command::LOADEXTENSION => todo!(),
             defs::Command::ALLOC => {
-                let mut reader = Reader::new(self.read::<20>().await?);
+                let mut reader = Reader::new(self.read_raw::<20>().await?);
                 let process_handle = reader.read_handle()?;
                 let address = reader.read_address()?;
                 let size = reader.read_u32()? as usize;
@@ -421,7 +427,7 @@ where
                 Ok(())
             }
             defs::Command::FREE => {
-                let mut reader = Reader::new(self.read::<16>().await?);
+                let mut reader = Reader::new(self.read_raw::<16>().await?);
                 let process_handle = reader.read_handle()?;
                 let address = reader.read_address()?;
                 let size = reader.read_u32()? as usize;
@@ -448,7 +454,7 @@ where
                 Ok(())
             }
             defs::Command::CREATETHREAD => {
-                let mut reader = Reader::new(self.read::<20>().await?);
+                let mut reader = Reader::new(self.read_raw::<20>().await?);
                 let process_handle = reader.read_handle()?;
                 let start_address = reader.read_address()?;
                 let parameter = reader.read_u64()?;
@@ -481,7 +487,7 @@ where
             defs::Command::LOADMODULE => todo!(),
             defs::Command::SPEEDHACK_SETSPEED => todo!(),
             defs::Command::VIRTUALQUERYEXFULL => {
-                let mut reader = Reader::new(self.read::<5>().await?);
+                let mut reader = Reader::new(self.read_raw::<5>().await?);
                 let handle = reader.read_handle()?;
                 let flags = VirtualQueryExFullFlags::from_bits(reader.read_byte()?)
                     .ok_or_else(|| anyhow!("invalid VirtualQueryExFull flags"))?;
@@ -513,7 +519,7 @@ where
                 Ok(())
             }
             defs::Command::SET_CONNECTION_NAME => {
-                let mut reader = Reader::new(self.read::<4>().await?);
+                let mut reader = Reader::new(self.read_raw::<4>().await?);
                 let name_len = reader.read_u32()?;
                 if name_len > 0x1000 {
                     return Err(anyhow!("name is too long"));
@@ -530,7 +536,7 @@ where
                 Ok(())
             }
             defs::Command::CREATETOOLHELP32SNAPSHOTEX => {
-                let mut reader = Reader::new(self.read::<8>().await?);
+                let mut reader = Reader::new(self.read_raw::<8>().await?);
                 let flags = Th32Flags::from_bits(reader.read_u32()?)
                     .ok_or_else(|| anyhow!("th32 dwFlags"))?;
 
@@ -585,7 +591,7 @@ where
                 Ok(())
             }
             defs::Command::CHANGEMEMORYPROTECTION => {
-                let mut reader = Reader::new(self.read::<20>().await?);
+                let mut reader = Reader::new(self.read_raw::<20>().await?);
                 let process_handle = reader.read_handle()?;
                 let address = reader.read_address()?;
                 let size = reader.read_u32()? as usize;
@@ -669,7 +675,7 @@ where
     }
 
     async fn process_next(&mut self, first: bool) -> anyhow::Result<()> {
-        let mut reader = Reader::new(self.read::<4>().await?);
+        let mut reader = Reader::new(self.read_raw::<4>().await?);
         let handle = reader.read_handle()?;
 
         let mut writer = Writer::new();

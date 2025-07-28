@@ -1,7 +1,7 @@
 use std::io::{self, Cursor};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use serde::{ser::SerializeTupleStruct, Serialize};
+use serde::{ser::SerializeTupleStruct, Deserialize, Serialize};
 
 use crate::server::{CeAddress, CeHandle, CeProcessId};
 
@@ -114,6 +114,7 @@ impl Writer {
     }
 }
 
+#[derive(Debug)]
 pub struct BytesVariant<const N: usize>(Vec<u8>);
 
 impl<const N: usize> From<String> for BytesVariant<N> {
@@ -158,7 +159,7 @@ pub type Bytes8 = BytesVariant<8>;
 pub type Bytes16 = BytesVariant<16>;
 pub type Bytes32 = BytesVariant<32>;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GetVersionResponse {
     pub version_number: i32,
     pub version_string: Bytes8,
@@ -173,7 +174,7 @@ impl GetVersionResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct EmptyResponse;
 
 impl EmptyResponse {
@@ -183,3 +184,13 @@ impl EmptyResponse {
 }
 
 pub type TerminateServerResponse = EmptyResponse;
+
+#[derive(Debug, Deserialize)]
+pub struct OpenProcessRequest {
+    pub process_id: CeProcessId,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenProcessResponse {
+    pub process_handle: CeHandle,
+}

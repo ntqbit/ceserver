@@ -37,7 +37,6 @@ pub async fn main() -> anyhow::Result<()> {
         let client_address = sockaddr.to_string();
 
         let (reader, writer) = stream.into_split();
-
         let mut client =
             StreamConnection::new(reader, writer, server.clone(), ProtocolVersion::Ver5);
 

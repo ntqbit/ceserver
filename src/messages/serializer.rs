@@ -3,7 +3,7 @@ use std::fmt::Display;
 use serde::{Serialize, Serializer};
 use strum::Display;
 
-pub struct CeSerializer {
+struct CeSerializer {
     buf: Vec<u8>,
 }
 
