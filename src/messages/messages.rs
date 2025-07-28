@@ -1,7 +1,7 @@
 use std::io::{self, Cursor};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use serde::{ser::SerializeTupleStruct, Deserialize, Serialize};
+use serde::{de::Error, ser::SerializeTupleStruct, Deserialize, Serialize};
 
 use crate::server::{CeAddress, CeHandle, CeProcessId};
 
@@ -117,9 +117,25 @@ impl Writer {
 #[derive(Debug)]
 pub struct BytesVariant<const N: usize>(Vec<u8>);
 
+impl<const N: usize> BytesVariant<N> {
+    pub fn into_inner(self) -> Vec<u8> {
+        self.0
+    }
+
+    pub fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<const N: usize> From<Vec<u8>> for BytesVariant<N> {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
 impl<const N: usize> From<String> for BytesVariant<N> {
     fn from(value: String) -> Self {
-        Self(value.into_bytes())
+        value.into_bytes().into()
     }
 }
 
@@ -150,6 +166,38 @@ macro_rules! impl_bytes_variant {
         }
     };
 }
+
+// impl<'de> Deserialize<'de> for BytesVariant<32> {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: serde::Deserializer<'de>,
+//     {
+//         struct _Visitor {}
+
+//         impl<'de> serde::de::Visitor<'de> for _Visitor {
+//             type Value = BytesVariant<32>;
+
+//             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+//                 formatter.write_str("bytes")
+//             }
+
+//             fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+//             where
+//                 A: serde::de::SeqAccess<'de>,
+//             {
+//                 let length: u32 = seq
+//                     .next_element()?
+//                     .ok_or(|| A::Error::missing_field("asd"))?;
+
+//                 let mut buf = vec![0; length as usize];
+//                 // let s: seq.next_element();
+//                 // TODO: implement
+//             }
+//         }
+
+//         deserializer.deserialize_seq(_Visitor {})
+//     }
+// }
 
 impl_bytes_variant!(8, u8);
 impl_bytes_variant!(16, u16);
@@ -193,4 +241,79 @@ pub struct OpenProcessRequest {
 #[derive(Debug, Serialize)]
 pub struct OpenProcessResponse {
     pub process_handle: CeHandle,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloseHandleRequest {
+    pub handle: CeHandle,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CloseHandleResponse {
+    pub status: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VirtualQueryExRequest {
+    pub process_handle: CeHandle,
+    pub base: CeAddress,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VirtualQueryExResponse {
+    pub status: u8,
+    pub protection: u32,
+    pub mem_type: u32,
+    pub base: u64,
+    pub size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReadProcessMemoryRequest {
+    pub process_handle: CeHandle,
+    pub base: u64,
+    pub size: u32,
+    pub compress: u8,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadProcessMemoryResponse {
+    pub data: Bytes32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WriteProcessMemoryRequest {
+    pub process_handle: CeHandle,
+    pub base: u64,
+    pub data: Bytes32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WriteProcessMemoryResponse {
+    pub status: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartDebugRequest {
+    pub process_handle: CeHandle,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartDebugResponse {
+    pub status: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetArchitectureRequest {
+    pub process_handle: CeHandle,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetArchitectureResponse {
+    pub architecture: u8,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetAbiResponse {
+    pub abi: u8,
 }

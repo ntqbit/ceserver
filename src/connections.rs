@@ -8,8 +8,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::{
     defs::{self, CeArch, Protection, Th32Flags},
     messages::{
-        deserialize, serialize, EmptyResponse, GetVersionResponse, OpenProcessRequest,
-        OpenProcessResponse, Reader, TerminateServerResponse, Writer,
+        deserialize, serialize, CloseHandleRequest, CloseHandleResponse, EmptyResponse,
+        GetAbiResponse, GetArchitectureRequest, GetArchitectureResponse, GetVersionResponse,
+        OpenProcessRequest, OpenProcessResponse, ReadProcessMemoryRequest,
+        ReadProcessMemoryResponse, Reader, StartDebugRequest, StartDebugResponse,
+        TerminateServerResponse, VirtualQueryExRequest, VirtualQueryExResponse,
+        WriteProcessMemoryRequest, WriteProcessMemoryResponse, Writer,
     },
     server::{CeServer, ModuleEntry, VirtualQueryExFullFlags},
 };
@@ -171,111 +175,80 @@ where
             defs::Command::OPENPROCESS => {
                 let req: OpenProcessRequest = self.read().await?;
 
-                if let Some(process_handle) = self.server.open_process(req.process_id).ok() {
-                    self.respond(OpenProcessResponse { process_handle }).await
-                } else {
-                    Err(anyhow!("process not found"))
-                }
+                let process_handle =
+                    if let Some(process_handle) = self.server.open_process(req.process_id).ok() {
+                        process_handle
+                    } else {
+                        0
+                    };
+
+                self.respond(OpenProcessResponse { process_handle }).await
             }
             defs::Command::CREATETOOLHELP32SNAPSHOT => todo!(),
             defs::Command::PROCESS32FIRST => Ok(self.process_next(true).await?),
             defs::Command::PROCESS32NEXT => Ok(self.process_next(false).await?),
             defs::Command::CLOSEHANDLE => {
-                let mut reader = Reader::new(self.read_raw::<4>().await?);
-                let handle = reader.read_handle()?;
+                let req: CloseHandleRequest = self.read().await?;
 
-                log::debug!("CLOSEHANDLE: {}", handle,);
-
-                if self.server.close_handle(handle).is_ok() {
-                    let mut writer = Writer::new();
-                    writer.write_i32(1);
-                    self.write_raw(writer.as_bytes()).await?;
-                    Ok(())
-                } else {
-                    Err(anyhow!("invalid handle"))
+                if self.server.close_handle(req.handle).is_err() {
+                    log::warn!("failed to close handle");
                 }
+
+                self.respond(CloseHandleResponse { status: 1 }).await
             }
             defs::Command::VIRTUALQUERYEX => {
-                let mut reader = Reader::new(self.read_raw::<12>().await?);
-                let handle = reader.read_handle()?;
-                let base = reader.read_address()?;
+                let req: VirtualQueryExRequest = self.read().await?;
 
-                log::debug!("VIRTUALQUERYEX: handle={}, base=0x{:X}", handle, base);
+                let result = self.server.virtual_query(req.process_handle, req.base);
 
-                let result = self.server.virtual_query(handle, base);
+                let response = match result {
+                    Ok(mem) => VirtualQueryExResponse {
+                        status: 1,
+                        protection: mem.protection.bits(),
+                        mem_type: mem.mem_type.bits(),
+                        base: mem.base,
+                        size: mem.size,
+                    },
+                    Err(_err) => VirtualQueryExResponse {
+                        status: 0,
+                        protection: 0,
+                        mem_type: 0,
+                        base: 0,
+                        size: 0,
+                    },
+                };
 
-                let mut writer = Writer::new();
-
-                match result {
-                    Ok(mem) => {
-                        writer.write_byte(1);
-                        writer.write_u32(mem.protection.bits());
-                        writer.write_u32(mem.mem_type.bits());
-                        writer.write_u64(mem.base);
-                        writer.write_u64(mem.size);
-                    }
-                    Err(_err) => {
-                        writer.write_byte(0);
-                        writer.write_u32(0);
-                        writer.write_u32(0);
-                        writer.write_u64(0);
-                        writer.write_u64(0);
-                    }
-                }
-
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(response).await
             }
             defs::Command::READPROCESSMEMORY => {
-                let mut reader = Reader::new(self.read_raw::<17>().await?);
-                let handle = reader.read_handle()?;
-                let base = reader.read_address()?;
-                let size = reader.read_u32()?;
-                let compress = reader.read_byte()?;
+                let req: ReadProcessMemoryRequest = self.read().await?;
 
-                log::debug!(
-                    "READPROCESSMEMORY: handle={}, base=0x{:X}, size=0x{:X}, compress={}",
-                    handle,
-                    base,
-                    size,
-                    compress
-                );
-
-                if compress != 0 {
+                if req.compress != 0 {
+                    // Compression is not yet implemented
+                    // But it's okay, it's rarely used
                     unimplemented!();
                 }
 
                 let bytes = self
                     .server
-                    .read_process_memory(handle, base, size)
+                    .read_process_memory(req.process_handle, req.base, req.size)
                     .unwrap_or_default();
 
-                let mut writer = Writer::new();
-                writer.write_bytes32(&bytes);
-
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(ReadProcessMemoryResponse { data: bytes.into() })
+                    .await
             }
             defs::Command::WRITEPROCESSMEMORY => {
-                let mut res = Reader::new(self.read_raw::<16>().await?);
-                let process_handle = res.read_handle()?;
-                let base = res.read_address()?;
-                let size = res.read_u32()? as usize;
-
-                log::debug!(
-                    "WRITEPROCESSMEMORY: handle={}, base=0x{:X}, size=0x{:X}",
-                    process_handle,
-                    base,
-                    size
-                );
+                let req: WriteProcessMemoryRequest = self.read().await?;
 
                 let mut success = false;
 
-                if size > 0 {
-                    let mut buf = vec![0u8; size];
-                    self.read_bytes(&mut buf).await?;
+                let data = req.data.into_inner();
 
-                    match self.server.write_process_memory(process_handle, base, &buf) {
+                if !data.is_empty() {
+                    match self
+                        .server
+                        .write_process_memory(req.process_handle, req.base, &data)
+                    {
                         Ok(_) => {
                             success = true;
                         }
@@ -285,26 +258,20 @@ where
                     }
                 }
 
-                let mut writer = Writer::new();
-                writer.write_u32(if success { 1 } else { 0 });
-
-                self.write_raw(writer.as_bytes()).await?;
-
-                Ok(())
+                self.respond(WriteProcessMemoryResponse {
+                    status: if success { 1 } else { 0 },
+                })
+                .await
             }
             defs::Command::STARTDEBUG => {
-                let mut res = Reader::new(self.read_raw::<4>().await?);
-                let process_handle = res.read_handle()?;
+                let req: StartDebugRequest = self.read().await?;
 
-                log::debug!("STARTDEBUG: handle={}", process_handle);
+                let success = self.server.start_debug(req.process_handle).is_ok();
 
-                let success = self.server.start_debug(process_handle).is_ok();
-
-                let mut writer = Writer::new();
-                writer.write_u32(if success { 1 } else { 0 });
-
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(StartDebugResponse {
+                    status: if success { 1 } else { 0 },
+                })
+                .await
             }
             defs::Command::STOPDEBUG => unimplemented!("not implemented by ceserver"),
             defs::Command::WAITFORDEBUGEVENT => {
@@ -351,17 +318,16 @@ where
             defs::Command::GETTHREADCONTEXT => todo!(),
             defs::Command::SETTHREADCONTEXT => todo!(),
             defs::Command::GETARCHITECTURE => {
-                let mut reader = Reader::new(self.read_raw::<4>().await?);
-                let handle = reader.read_handle()?;
+                let req: GetArchitectureRequest = self.read().await?;
                 let architecture = self
                     .server
-                    .get_architecture(handle)
+                    .get_architecture(req.process_handle)
                     .unwrap_or(CeArch::Invalid);
 
-                let mut writer = Writer::new();
-                writer.write_byte(architecture as u8);
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(GetArchitectureResponse {
+                    architecture: architecture as u8,
+                })
+                .await
             }
             defs::Command::MODULE32FIRST => todo!(),
             defs::Command::MODULE32NEXT => todo!(),
@@ -513,10 +479,10 @@ where
             }
             defs::Command::GETREGIONINFO => todo!(),
             defs::Command::GETABI => {
-                let mut writer = Writer::new();
-                writer.write_byte(self.server.get_abi() as u8);
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(GetAbiResponse {
+                    abi: self.server.get_abi() as u8,
+                })
+                .await
             }
             defs::Command::SET_CONNECTION_NAME => {
                 let mut reader = Reader::new(self.read_raw::<4>().await?);
