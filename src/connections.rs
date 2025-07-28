@@ -1,12 +1,6 @@
-use std::{
-    io::{self, Cursor, Write},
-    mem::MaybeUninit,
-    pin::Pin,
-    sync::Arc,
-};
+use std::{borrow::Cow, mem::MaybeUninit, pin::Pin, sync::Arc};
 
 use anyhow::anyhow;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -16,7 +10,7 @@ use tokio::{
 use crate::{
     defs::{self, CeArch, Protection, Th32Flags},
     messages::{Reader, Writer},
-    server::{CeAddress, CeHandle, CeProcessId, CeServer, ModuleEntry, VirtualQueryExFullFlags},
+    server::{CeServer, ModuleEntry, VirtualQueryExFullFlags},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,19 +59,28 @@ pub struct StreamConnection {
     protocol_version: ProtocolVersion,
     stream: Pin<Box<dyn Stream + Send>>,
     server: Arc<dyn CeServer + Send + Sync>,
-    connection_name: String,
+    connection_name: Cow<'static, str>,
+    connection_id: Cow<'static, str>,
 }
 
 impl StreamConnection {
+    const INITIAL_CONNECTION_NAME: &str = "*";
+    const DEFAULT_CONNECTION_ID: &str = "*";
+
     pub fn new(
         stream: Box<dyn Stream + Send>,
         server: Arc<dyn CeServer + Send + Sync>,
         protocol_version: ProtocolVersion,
+        // An optional connection identifier string that is used solely for logging or other diagnostics.
+        connection_id: Option<String>,
     ) -> Self {
         Self {
             stream: Box::into_pin(stream),
             server,
-            connection_name: "*".to_string(),
+            connection_name: Cow::Borrowed(Self::INITIAL_CONNECTION_NAME),
+            connection_id: connection_id
+                .map(|x| Cow::Owned(x))
+                .unwrap_or(Cow::Borrowed(Self::DEFAULT_CONNECTION_ID)),
             protocol_version,
         }
     }
@@ -114,13 +117,17 @@ impl StreamConnection {
         Ok(())
     }
 
-    #[allow(non_snake_case)]
     pub async fn serve_once(&mut self) -> anyhow::Result<()> {
         let Ok(command) = defs::Command::try_from(self.read::<1>().await?[0]) else {
             return Err(anyhow!("unknown command"));
         };
 
-        log::debug!("[{}] Command: {:?}", self.connection_name, command);
+        log::debug!(
+            "[{}] [{}] Command: {:?}",
+            self.connection_id,
+            self.connection_name,
+            command
+        );
 
         self.handle_command(command).await
     }
@@ -517,7 +524,7 @@ impl StreamConnection {
 
                 log::info!("Updated connection name: {}", connection_name);
 
-                self.connection_name = connection_name;
+                self.connection_name = Cow::Owned(connection_name);
 
                 Ok(())
             }
@@ -690,4 +697,8 @@ impl StreamConnection {
     }
 }
 
-// TODO: write tests
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stream_connection_test() {}
+}

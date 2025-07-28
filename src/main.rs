@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use connections::{ProtocolVersion, StreamConnection};
 use environment_server::EnvironmentServer;
@@ -10,9 +10,9 @@ mod defs;
 mod environment;
 mod environment_server;
 mod handle;
+mod messages;
 mod mock_env;
 mod server;
-mod messages;
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
@@ -34,9 +34,14 @@ pub async fn main() -> anyhow::Result<()> {
         stream.set_nodelay(true).unwrap();
 
         log::info!("Client connected from {}", sockaddr);
+        let connection_id = sockaddr.to_string();
 
-        let mut client =
-            StreamConnection::new(Box::new(stream), server.clone(), ProtocolVersion::Ver5);
+        let mut client = StreamConnection::new(
+            Box::new(stream),
+            server.clone(),
+            ProtocolVersion::Ver5,
+            Some(connection_id),
+        );
 
         tokio::spawn(async move {
             let result = client.serve().await;
