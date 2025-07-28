@@ -12,6 +12,7 @@ mod environment_server;
 mod handle;
 mod mock_env;
 mod server;
+mod messages;
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
