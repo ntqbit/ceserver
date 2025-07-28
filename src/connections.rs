@@ -1,14 +1,8 @@
-use std::{
-    borrow::Cow,
-    pin::{pin, Pin},
-};
+use std::borrow::Cow;
 
 use anyhow::anyhow;
 
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     defs::{self, CeArch, Protection, Th32Flags},
@@ -752,8 +746,7 @@ mod tests {
         protocol_version: ProtocolVersion,
     ) -> Vec<u8> {
         let mut output = Vec::new();
-        let stream = InputStream(io::Cursor::new(input));
-        let reader = Pin::new(Box::new(stream));
+        let reader = InputStream(io::Cursor::new(input));
         let mut connection = StreamConnection::new(reader, &mut output, server, protocol_version);
 
         let _result = futures::executor::block_on(connection.serve())
