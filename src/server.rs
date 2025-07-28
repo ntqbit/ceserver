@@ -4,6 +4,8 @@ use crate::defs::{CeAbi, CeArch, MemoryType, Protection, Th32Flags};
 use bitflags::bitflags;
 use strum::Display;
 
+pub const CE_VERSION_STRING: &str = "CHEATENGINE Network 2.2";
+
 #[derive(Display, Debug, PartialEq, Eq, Hash, Clone, Copy)]
 #[repr(u32)]
 pub enum CeOption {
@@ -144,9 +146,7 @@ pub struct Tlhelp32Snapshot {
     pub threads: Box<dyn ResettableIterator<Item = ThreadEntry> + Send>,
 }
 
-pub struct DebugEvent {
-
-}
+pub struct DebugEvent {}
 
 pub type WaitForDebugEventCb = Box<dyn FnOnce(DebugEvent)>;
 
@@ -228,7 +228,12 @@ pub trait CeServer {
 
     fn start_debug(&self, process_handle: CeHandle) -> Result<()>;
 
-    fn wait_for_debug_event(&self, process_handle: CeHandle, timeout: u32, cb: WaitForDebugEventCb) -> Result<()>;
+    fn wait_for_debug_event(
+        &self,
+        process_handle: CeHandle,
+        timeout: u32,
+        cb: WaitForDebugEventCb,
+    ) -> Result<()>;
 }
 
 // TODO: write tests

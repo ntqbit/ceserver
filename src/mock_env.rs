@@ -352,7 +352,12 @@ impl Process for MockProcess {
             .map_err(|_| EnvError::AccessOutsideBounds)
     }
 
-    fn change_memory_protection(&self, base: u64, size: u64, protection: Protection) -> EnvResult<()> {
+    fn change_memory_protection(
+        &self,
+        base: u64,
+        size: u64,
+        protection: Protection,
+    ) -> EnvResult<()> {
         // TODO: implement
         Ok(())
     }

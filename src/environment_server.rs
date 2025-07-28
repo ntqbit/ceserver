@@ -12,11 +12,9 @@ use crate::{
     server::{
         self, CeHandle, CeOption, CeOptionDescription, CeProcessId, CeServer, ModuleEntry,
         ProcessEntry, RegionInfo, ResettableIterator, ServerError, ThreadEntry, Tlhelp32Snapshot,
-        VirtualQueryExFullFlags, WaitForDebugEventCb, CE_OPTIONS,
+        VirtualQueryExFullFlags, WaitForDebugEventCb, CE_OPTIONS, CE_VERSION_STRING,
     },
 };
-
-const CE_VERSION_STRING: &str = "CHEATENGINE Network 2.2";
 
 pub enum Resource {
     TlhelpSnapshot(Arc<Mutex<Tlhelp32Snapshot>>),

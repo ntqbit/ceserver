@@ -1,4 +1,4 @@
-use std::{borrow::Cow, mem::MaybeUninit, pin::Pin, sync::Arc};
+use std::{borrow::Cow, pin::Pin, sync::Arc};
 
 use anyhow::anyhow;
 
@@ -100,7 +100,7 @@ impl StreamConnection {
     }
 
     async fn read<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
-        let mut buf: [u8; N] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut buf: [u8; N] = [0; N];
         self.read_bytes(&mut buf).await?;
         Ok(buf)
     }
@@ -699,6 +699,317 @@ impl StreamConnection {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io,
+        pin::{pin, Pin},
+        sync::{Arc, Mutex},
+        task::Poll,
+    };
+
+    use hex_literal::hex;
+
+    use crate::{
+        connections::ProtocolVersion,
+        server::{CeServer, CE_VERSION_STRING},
+    };
+
+    use super::StreamConnection;
+
+    struct InputStream<'a>(io::Cursor<&'a [u8]>);
+
+    impl<'a> super::AsyncRead for InputStream<'a> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let pos = self.0.position() as usize;
+            let slice: &[u8] = self.0.get_ref();
+            let remaining = slice.len() - pos;
+
+            if remaining == 0 {
+                // No more data. Simulate connection reset.
+                return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
+            }
+
+            let read_len = buf.remaining();
+            let start = pos as usize;
+            let min_read_len = std::cmp::min(read_len, remaining);
+            let end = start + min_read_len;
+            buf.put_slice(&slice[start..end]);
+            self.0.set_position(end as u64);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct BufStream<'a> {
+        input: InputStream<'a>,
+        output: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl<'a> BufStream<'a> {
+        pub fn new(input: &'a [u8], output: Arc<Mutex<Vec<u8>>>) -> Self {
+            Self {
+                input: InputStream(io::Cursor::new(input)),
+                output,
+            }
+        }
+    }
+
+    impl<'a> super::AsyncRead for BufStream<'a> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            pin!(&mut self.input).poll_read(cx, buf)
+        }
+    }
+
+    impl<'a> super::AsyncWrite for BufStream<'a> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            pin!(&mut *self.output.lock().unwrap()).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<Result<(), io::Error>> {
+            pin!(&mut *self.output.lock().unwrap()).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<Result<(), io::Error>> {
+            pin!(&mut *self.output.lock().unwrap()).poll_shutdown(cx)
+        }
+    }
+
+    impl<'a> super::Stream for BufStream<'a> {}
+
+    fn run_connection(
+        input: &'static [u8],
+        server: Arc<dyn CeServer + Send + Sync>,
+        protocol_version: ProtocolVersion,
+    ) -> Vec<u8> {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let stream = BufStream::new(input, Arc::clone(&output));
+        let mut connection =
+            StreamConnection::new(Box::new(stream), server, protocol_version, None);
+
+        let _result = futures::executor::block_on(connection.serve())
+            // It always returns an error.
+            .unwrap_err();
+
+        // TODO: check the result. it should return ConnectionReset.
+
+        let output = std::mem::take(&mut *output.lock().unwrap());
+        output
+    }
+
+    fn test_input_output(
+        input: &'static [u8],
+        expected_output: &[u8],
+        server: Arc<dyn CeServer + Send + Sync>,
+        protocol_version: ProtocolVersion,
+    ) {
+        let output = run_connection(input, server, protocol_version);
+        assert_eq!(
+            output, expected_output,
+            "output mismatch. expected: {:02X?}, actual: {:02X?}",
+            expected_output, output
+        );
+    }
+
+    fn mock_server() -> Arc<dyn CeServer + Send + Sync> {
+        Arc::new(MockServer::new())
+    }
+
+    struct MockServer {}
+
+    impl MockServer {
+        pub fn new() -> Self {
+            Self {}
+        }
+    }
+
+    #[allow(unused)]
+    impl CeServer for MockServer {
+        fn get_version_string(&self) -> String {
+            CE_VERSION_STRING.to_string()
+        }
+
+        fn get_abi(&self) -> crate::defs::CeAbi {
+            todo!()
+        }
+
+        fn terminate_server(&self) {
+            todo!()
+        }
+
+        fn open_process(
+            &self,
+            pid: crate::server::CeProcessId,
+        ) -> crate::server::Result<crate::server::CeHandle> {
+            todo!()
+        }
+
+        fn close_handle(&self, handle: crate::server::CeHandle) -> crate::server::Result<()> {
+            todo!()
+        }
+
+        fn read_process_memory(
+            &self,
+            process_handle: crate::server::CeHandle,
+            base: crate::server::CeAddress,
+            size: u32,
+        ) -> crate::server::Result<Vec<u8>> {
+            todo!()
+        }
+
+        fn write_process_memory(
+            &self,
+            process_handle: crate::server::CeHandle,
+            base: crate::server::CeAddress,
+            buf: &[u8],
+        ) -> crate::server::Result<()> {
+            todo!()
+        }
+
+        fn change_memory_protection(
+            &self,
+            process_handle: crate::server::CeHandle,
+            base: crate::server::CeAddress,
+            size: usize,
+            protection: crate::defs::Protection,
+        ) -> crate::server::Result<()> {
+            todo!()
+        }
+
+        fn get_architecture(
+            &self,
+            process_handle: crate::server::CeHandle,
+        ) -> crate::server::Result<crate::defs::CeArch> {
+            todo!()
+        }
+
+        fn create_tlhelp32_snapshot(
+            &self,
+            flags: crate::defs::Th32Flags,
+            pid: crate::server::CeProcessId,
+        ) -> crate::server::Result<crate::server::CeHandle> {
+            todo!()
+        }
+
+        fn get_tlhelp32_snapshot(
+            &self,
+            handle: crate::server::CeHandle,
+        ) -> crate::server::Result<Arc<Mutex<crate::server::Tlhelp32Snapshot>>> {
+            todo!()
+        }
+
+        fn list_modules(
+            &self,
+            pid: crate::server::CeProcessId,
+        ) -> crate::server::Result<Vec<crate::server::ModuleEntry>> {
+            todo!()
+        }
+
+        fn list_threads(
+            &self,
+            pid: crate::server::CeProcessId,
+        ) -> crate::server::Result<Vec<crate::server::ThreadEntry>> {
+            todo!()
+        }
+
+        fn list_processes(&self) -> crate::server::Result<Vec<crate::server::ProcessEntry>> {
+            todo!()
+        }
+
+        fn get_options(&self) -> crate::server::Result<Vec<crate::server::CeOptionDescription>> {
+            todo!()
+        }
+
+        fn get_option_value(
+            &self,
+            option_id: crate::server::CeOption,
+        ) -> crate::server::Result<String> {
+            todo!()
+        }
+
+        fn virtual_query(
+            &self,
+            process_handle: crate::server::CeHandle,
+            base: crate::server::CeAddress,
+        ) -> crate::server::Result<crate::server::RegionInfo> {
+            todo!()
+        }
+
+        fn virtual_query_full(
+            &self,
+            process_handle: crate::server::CeHandle,
+            flags: crate::server::VirtualQueryExFullFlags,
+        ) -> crate::server::Result<Vec<crate::server::RegionInfo>> {
+            todo!()
+        }
+
+        fn alloc(
+            &self,
+            process_handle: crate::server::CeHandle,
+            preferred_base: crate::server::CeAddress,
+            size: usize,
+            protection: crate::defs::Protection,
+        ) -> crate::server::Result<crate::server::CeAddress> {
+            todo!()
+        }
+
+        fn free(
+            &self,
+            process_handle: crate::server::CeHandle,
+            base: crate::server::CeAddress,
+            size: usize,
+        ) -> crate::server::Result<()> {
+            todo!()
+        }
+
+        fn create_thread(
+            &self,
+            process_handle: crate::server::CeHandle,
+            start_address: crate::server::CeAddress,
+            parameter: u64,
+        ) -> crate::server::Result<crate::server::CeHandle> {
+            todo!()
+        }
+
+        fn is_android(&self) -> bool {
+            todo!()
+        }
+
+        fn start_debug(
+            &self,
+            process_handle: crate::server::CeHandle,
+        ) -> crate::server::Result<()> {
+            todo!()
+        }
+
+        fn wait_for_debug_event(
+            &self,
+            process_handle: crate::server::CeHandle,
+            timeout: u32,
+            cb: crate::server::WaitForDebugEventCb,
+        ) -> crate::server::Result<()> {
+            todo!()
+        }
+    }
+
     #[test]
-    fn stream_connection_test() {}
+    fn test_get_version() {
+        const OUTPUT: &[u8] = &hex!("05000000174348454154454e47494e45204e6574776f726b20322e32");
+        test_input_output(&hex!("00"), OUTPUT, mock_server(), ProtocolVersion::Ver5);
+    }
 }
