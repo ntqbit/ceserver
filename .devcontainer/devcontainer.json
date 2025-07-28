@@ -1,0 +1,13 @@
+{
+    "image": "mcr.microsoft.com/vscode/devcontainers/rust:latest",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "ms-python.python",
+                "charliermarsh.ruff"
+            ]
+        }
+    }
+}
