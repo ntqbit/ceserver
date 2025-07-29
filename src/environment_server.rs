@@ -264,7 +264,7 @@ impl CeServer for EnvironmentServer {
             .map(|me| ModuleEntry {
                 base: me.base,
                 part: 0, // TODO: fix
-                size: me.size as i32,
+                size: me.size as u32,
                 fileoffset: me.fileoffset as u32,
                 name: me.name,
             })

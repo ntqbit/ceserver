@@ -126,8 +126,8 @@ pub struct ProcessEntry {
 #[derive(Debug, Clone)]
 pub struct ModuleEntry {
     pub base: u64,
-    pub part: i32,
-    pub size: i32,
+    pub part: u32,
+    pub size: u32,
     pub fileoffset: u32,
     pub name: String,
 }

@@ -1,21 +1,29 @@
-use std::{borrow::Cow, fmt::Debug, io::Read};
+use std::{borrow::Cow, fmt::Debug};
 
 use anyhow::anyhow;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     defs::{self, CeArch, Protection, Th32Flags},
     messages::{
-        deserialize, serialize, CloseHandleRequest, CloseHandleResponse, EmptyResponse,
-        GetAbiResponse, GetArchitectureRequest, GetArchitectureResponse, GetVersionResponse,
-        OpenProcessRequest, OpenProcessResponse, ReadProcessMemoryRequest,
-        ReadProcessMemoryResponse, Reader, StartDebugRequest, StartDebugResponse,
-        TerminateServerResponse, VirtualQueryExRequest, VirtualQueryExResponse,
-        WriteProcessMemoryRequest, WriteProcessMemoryResponse, Writer,
+        deserialize, serialize, AllocRequest, AllocResponse, ChangeMemoryProtectionRequest,
+        ChangeMemoryProtectionResponse, CloseHandleRequest, CloseHandleResponse,
+        CreateThreadRequest, CreateThreadResponse, CreateToolhelp32SnapshotModulesResponse5,
+        CreateToolhelp32SnapshotModulesResponse6, CreateToolhelp32SnapshotProcessResponse,
+        CreateToolhelp32SnapshotRequest, CreateToolhelp32SnapshotThreadsResponse, Deserialize,
+        FreeRequest, FreeResponse, GetAbiResponse, GetArchitectureRequest, GetArchitectureResponse,
+        GetOptionsResponse, GetSymbolListFromFileRequest5, GetSymbolListFromFileRequest6,
+        GetSymbolListFromFileResponse, GetVersionResponse, IsAndroidResponse, ModuleResponse5,
+        ModuleResponse6, OpenProcessRequest, OpenProcessResponse, OptionResponse,
+        Process32NextRequest, Process32NextResponse, ReadProcessMemoryRequest,
+        ReadProcessMemoryResponse, RegionResponse, Serialize, SetConnectionNameRequest,
+        SetConnectionNameResponse, StartDebugRequest, StartDebugResponse, TerminateServerResponse,
+        VirtualQueryExFullRequest, VirtualQueryExFullResponse, VirtualQueryExRequest,
+        VirtualQueryExResponse, WaitForDebugEventRequest, WaitForDebugEventResponse,
+        WriteProcessMemoryRequest, WriteProcessMemoryResponse,
     },
-    server::{CeServer, ModuleEntry, VirtualQueryExFullFlags},
+    server::{CeServer, VirtualQueryExFullFlags},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,21 +45,10 @@ impl Ord for ProtocolVersion {
 }
 
 impl ProtocolVersion {
-    pub fn is_newer_than(&self, other: ProtocolVersion) -> bool {
-        self >= &other
-    }
-
     pub fn version_number(&self) -> i32 {
         match self {
             ProtocolVersion::Ver5 => 5,
             ProtocolVersion::Ver6 => 6,
-        }
-    }
-
-    pub fn has_module_fileoffset(&self) -> bool {
-        match self {
-            ProtocolVersion::Ver5 => false,
-            ProtocolVersion::Ver6 => true,
         }
     }
 }
@@ -99,23 +96,20 @@ where
         }
     }
 
-    async fn read_bytes(&mut self, buf: &mut [u8]) -> anyhow::Result<()> {
+    async fn read_buf(&mut self, buf: &mut [u8]) -> anyhow::Result<()> {
         self.reader.read_exact(buf).await?;
         log::trace!("Read: {:02X?}", buf);
         Ok(())
     }
 
-    async fn read_raw<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
+    async fn read_bytes<const N: usize>(&mut self) -> anyhow::Result<[u8; N]> {
         let mut buf: [u8; N] = [0; N];
-        self.read_bytes(&mut buf).await?;
+        self.read_buf(&mut buf).await?;
         Ok(buf)
     }
 
-    async fn read<T: Debug + DeserializeOwned>(&mut self) -> anyhow::Result<T> {
-        let mut buf = [0; 4096];
-        let length = self.reader.read(&mut buf).await?;
-        let data = &buf[..length];
-        let req = deserialize(data)?;
+    async fn read<T: Debug + Deserialize>(&mut self) -> anyhow::Result<T> {
+        let req = deserialize(&mut self.reader).await?;
         log::debug!("Request: {:?}", req);
         Ok(req)
     }
@@ -139,7 +133,7 @@ where
     }
 
     pub async fn serve_once(&mut self) -> anyhow::Result<()> {
-        let Ok(command) = defs::Command::try_from(self.read_raw::<1>().await?[0]) else {
+        let Ok(command) = defs::Command::try_from(self.read_bytes::<1>().await?[0]) else {
             return Err(anyhow!("unknown command"));
         };
 
@@ -275,20 +269,12 @@ where
             }
             defs::Command::STOPDEBUG => unimplemented!("not implemented by ceserver"),
             defs::Command::WAITFORDEBUGEVENT => {
-                let mut res = Reader::new(self.read_raw::<8>().await?);
-                let process_handle = res.read_handle()?;
-                let timeout = res.read_u32()?;
-
-                log::debug!(
-                    "WAITFORDEBUGEVENT: handle={}, timeout={}",
-                    process_handle,
-                    timeout
-                );
+                let req: WaitForDebugEventRequest = self.read().await?;
 
                 self.server
                     .wait_for_debug_event(
-                        process_handle,
-                        timeout,
+                        req.process_handle,
+                        req.timeout,
                         Box::new(|_de| {
                             // TODO: send debug event to the client.
 
@@ -308,7 +294,7 @@ where
                     )
                     .map_err(|e| anyhow!("wait_for_debug_event error: {}", e))?;
 
-                Ok(())
+                self.respond(WaitForDebugEventResponse::new()).await
             }
             defs::Command::CONTINUEFROMDEBUGEVENT => todo!(),
             defs::Command::SETBREAKPOINT => todo!(),
@@ -332,53 +318,31 @@ where
             defs::Command::MODULE32FIRST => todo!(),
             defs::Command::MODULE32NEXT => todo!(),
             defs::Command::GETSYMBOLLISTFROMFILE => {
-                let mut reader = Reader::new(self.read_raw::<8>().await?);
-
-                let fileoffset = if self.protocol_version.has_module_fileoffset() {
-                    reader.read_u32()?
-                } else {
-                    0
+                let req: GetSymbolListFromFileRequest6 = match self.protocol_version {
+                    ProtocolVersion::Ver5 => {
+                        self.read::<GetSymbolListFromFileRequest5>().await?.into()
+                    }
+                    ProtocolVersion::Ver6 => self.read().await?,
                 };
-
-                let symbolpathlen = reader.read_u32()? as usize;
-                let mut buf = vec![0u8; symbolpathlen];
-                if symbolpathlen > 0x1000 {
-                    return Err(anyhow!("symbolpathlen is too long"));
-                }
-                self.read_bytes(&mut buf).await?;
-                let symbolpath = String::from_utf8(buf)?;
-
-                log::debug!(
-                    "GETSYMBOLLISTFROMFILE: fileoffset=0x{:X}, symbolpath={}",
-                    fileoffset,
-                    symbolpath
-                );
+                let _symbolpath = String::from_utf8(req.symbolpath.into_inner())?;
 
                 // TODO: implement
-                let mut writer = Writer::new();
-                writer.write_u64(0);
-                self.write_raw(writer.as_bytes()).await?;
 
-                Ok(())
+                self.respond(GetSymbolListFromFileResponse { result: 0 })
+                    .await
             }
             defs::Command::LOADEXTENSION => todo!(),
             defs::Command::ALLOC => {
-                let mut reader = Reader::new(self.read_raw::<20>().await?);
-                let process_handle = reader.read_handle()?;
-                let address = reader.read_address()?;
-                let size = reader.read_u32()? as usize;
-                let protection = Protection::from_bits(reader.read_u32()?)
+                let req: AllocRequest = self.read().await?;
+                let protection = Protection::from_bits(req.protection)
                     .ok_or_else(|| anyhow!("invalid protection"))?;
 
-                log::debug!(
-                    "ALLOC: process_handle={}, address=0x{:X}, size={:X}, protection={:?}",
-                    process_handle,
-                    address,
-                    size,
-                    protection
-                );
-
-                let result = match self.server.alloc(process_handle, address, size, protection) {
+                let result = match self.server.alloc(
+                    req.process_handle,
+                    req.address,
+                    req.size as usize,
+                    protection,
+                ) {
                     Ok(base) => base,
                     Err(err) => {
                         log::debug!("Could not alloc: {}", err);
@@ -386,96 +350,64 @@ where
                     }
                 };
 
-                let mut writer = Writer::new();
-                writer.write_address(result);
-                self.write_raw(writer.as_bytes()).await?;
-
-                Ok(())
+                self.respond(AllocResponse { address: result }).await
             }
             defs::Command::FREE => {
-                let mut reader = Reader::new(self.read_raw::<16>().await?);
-                let process_handle = reader.read_handle()?;
-                let address = reader.read_address()?;
-                let size = reader.read_u32()? as usize;
+                let req: FreeRequest = self.read().await?;
 
-                log::debug!(
-                    "FREE: process_handle={}, address=0x{:X}, size={:X}",
-                    process_handle,
-                    address,
-                    size
-                );
-
-                let result = match self.server.free(process_handle, address, size) {
-                    Ok(_) => 1,
-                    Err(err) => {
-                        log::debug!("Could not alloc: {}", err);
-                        0
-                    }
-                };
-
-                let mut writer = Writer::new();
-                writer.write_u32(result);
-                self.write_raw(writer.as_bytes()).await?;
-
-                Ok(())
-            }
-            defs::Command::CREATETHREAD => {
-                let mut reader = Reader::new(self.read_raw::<20>().await?);
-                let process_handle = reader.read_handle()?;
-                let start_address = reader.read_address()?;
-                let parameter = reader.read_u64()?;
-
-                log::debug!(
-                    "CREATETHREAD: process_handle={}, start_address=0x{:X}, parameter={:X}",
-                    process_handle,
-                    start_address,
-                    parameter
-                );
-
-                let handle =
+                let result =
                     match self
                         .server
-                        .create_thread(process_handle, start_address, parameter)
+                        .free(req.process_handle, req.address, req.size as usize)
                     {
-                        Ok(handle) => handle,
+                        Ok(_) => 1,
                         Err(err) => {
                             log::debug!("Could not alloc: {}", err);
                             0
                         }
                     };
 
-                let mut writer = Writer::new();
-                writer.write_handle(handle);
-                self.write_raw(writer.as_bytes()).await?;
+                self.respond(FreeResponse { result }).await
+            }
+            defs::Command::CREATETHREAD => {
+                let req: CreateThreadRequest = self.read().await?;
 
-                Ok(())
+                let thread_handle = match self.server.create_thread(
+                    req.process_handle,
+                    req.start_address,
+                    req.parameter,
+                ) {
+                    Ok(handle) => handle,
+                    Err(err) => {
+                        log::debug!("Could not create thread: {}", err);
+                        0
+                    }
+                };
+
+                self.respond(CreateThreadResponse { thread_handle }).await
             }
             defs::Command::LOADMODULE => todo!(),
             defs::Command::SPEEDHACK_SETSPEED => todo!(),
             defs::Command::VIRTUALQUERYEXFULL => {
-                let mut reader = Reader::new(self.read_raw::<5>().await?);
-                let handle = reader.read_handle()?;
-                let flags = VirtualQueryExFullFlags::from_bits(reader.read_byte()?)
+                let req: VirtualQueryExFullRequest = self.read().await?;
+                let flags = VirtualQueryExFullFlags::from_bits(req.flags)
                     .ok_or_else(|| anyhow!("invalid VirtualQueryExFull flags"))?;
 
-                log::debug!("VIRTUALQUERYEXFULL: handle={}, flags={:?}", handle, flags);
+                let regions = self.server.virtual_query_full(req.process_handle, flags)?;
 
-                let regions = self.server.virtual_query_full(handle, flags)?;
-
-                let mut writer = Writer::new();
-
-                writer.write_u32(regions.len() as u32);
-
-                for region in regions {
-                    log::debug!("Region: {:?}", region);
-                    writer.write_address(region.base);
-                    writer.write_u64(region.size);
-                    writer.write_u32(region.protection.bits());
-                    writer.write_u32(region.mem_type.bits());
-                }
-
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(VirtualQueryExFullResponse {
+                    regions: regions
+                        .into_iter()
+                        .map(|region| RegionResponse {
+                            base: region.base,
+                            size: region.size,
+                            protection: region.protection.bits(),
+                            mem_type: region.mem_type.bits(),
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                })
+                .await
             }
             defs::Command::GETREGIONINFO => todo!(),
             defs::Command::GETABI => {
@@ -485,92 +417,84 @@ where
                 .await
             }
             defs::Command::SET_CONNECTION_NAME => {
-                let mut reader = Reader::new(self.read_raw::<4>().await?);
-                let name_len = reader.read_u32()?;
-                if name_len > 0x1000 {
-                    return Err(anyhow!("name is too long"));
-                }
-                let mut buf = vec![0u8; name_len as usize];
-                self.read_bytes(&mut buf).await?;
-
-                let connection_name = String::from_utf8(buf)?;
+                let req: SetConnectionNameRequest = self.read().await?;
+                let connection_name = String::from_utf8(req.name.into_inner())?;
 
                 log::info!("Updated connection name: {}", connection_name);
-
                 self.connection_name = Cow::Owned(connection_name);
 
-                Ok(())
+                self.respond(SetConnectionNameResponse::new()).await
             }
             defs::Command::CREATETOOLHELP32SNAPSHOTEX => {
-                let mut reader = Reader::new(self.read_raw::<8>().await?);
-                let flags = Th32Flags::from_bits(reader.read_u32()?)
-                    .ok_or_else(|| anyhow!("th32 dwFlags"))?;
+                let req: CreateToolhelp32SnapshotRequest = self.read().await?;
+                let flags =
+                    Th32Flags::from_bits(req.flags).ok_or_else(|| anyhow!("th32 dwFlags"))?;
 
-                let pid = reader.read_u32()?;
-
-                let mut writer = Writer::new();
+                let pid = req.pid;
 
                 if flags.intersects(Th32Flags::TH32CS_SNAPTHREAD) {
                     let threads = self.server.list_threads(pid).unwrap_or_default();
 
-                    writer.write_u32(threads.len() as u32);
-                    threads
-                        .into_iter()
-                        .for_each(|te| writer.write_u32(te.thread_id));
+                    self.respond(CreateToolhelp32SnapshotThreadsResponse {
+                        thread_ids: threads
+                            .into_iter()
+                            .map(|te| te.thread_id)
+                            .collect::<Vec<_>>()
+                            .into(),
+                    })
+                    .await
                 } else if flags.intersects(Th32Flags::TH32CS_SNAPMODULE_ANY) {
                     let modules = self.server.list_modules(pid).unwrap_or_default();
 
-                    let mut write_module_entry = |result: i32, me: &ModuleEntry| {
-                        writer.write_i32(result);
-                        writer.write_address(me.base);
-                        writer.write_i32(me.part);
-                        writer.write_i32(me.size);
-                        if self.protocol_version.has_module_fileoffset() {
-                            writer.write_u32(me.fileoffset);
+                    let modules = modules
+                        .into_iter()
+                        .map(|me| ModuleResponse6 {
+                            base: me.base,
+                            part: me.part,
+                            size: me.size,
+                            file_offset: me.fileoffset,
+                            name: me.name.into(),
+                        })
+                        .collect::<Vec<_>>();
+
+                    match self.protocol_version {
+                        ProtocolVersion::Ver5 => {
+                            self.respond(CreateToolhelp32SnapshotModulesResponse5 {
+                                modules: modules
+                                    .into_iter()
+                                    .map(|m| m.into())
+                                    .collect::<Vec<ModuleResponse5>>()
+                                    .into(),
+                            })
+                            .await
                         }
-                        writer.write_bytes32(me.name.as_bytes());
-                    };
-
-                    for me in modules {
-                        write_module_entry(1, &me);
+                        ProtocolVersion::Ver6 => {
+                            self.respond(CreateToolhelp32SnapshotModulesResponse6 {
+                                modules: modules.into(),
+                            })
+                            .await
+                        }
                     }
-
-                    write_module_entry(
-                        0,
-                        &ModuleEntry {
-                            base: 0,
-                            part: 0,
-                            size: 0,
-                            fileoffset: 0,
-                            name: String::new(),
-                        },
-                    );
                 } else {
-                    assert!(flags == Th32Flags::TH32CS_SNAPPROCESS);
+                    assert_eq!(flags, Th32Flags::TH32CS_SNAPPROCESS);
 
-                    let handle = self.server.create_tlhelp32_snapshot(flags, pid)?;
+                    let snapshot_handle = self.server.create_tlhelp32_snapshot(flags, pid)?;
 
-                    writer.write_handle(handle);
+                    self.respond(CreateToolhelp32SnapshotProcessResponse { snapshot_handle })
+                        .await
                 }
-
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
             }
             defs::Command::CHANGEMEMORYPROTECTION => {
-                let mut reader = Reader::new(self.read_raw::<20>().await?);
-                let process_handle = reader.read_handle()?;
-                let address = reader.read_address()?;
-                let size = reader.read_u32()? as usize;
-                let protection = Protection::from_bits(reader.read_u32()?)
+                let req: ChangeMemoryProtectionRequest = self.read().await?;
+                let protection = Protection::from_bits(req.protection)
                     .ok_or_else(|| anyhow!("invalid protection"))?;
 
-                log::debug!("CHANGEMEMORYPROTECTION: process_handle={}, address=0x{:X}, size={:X}, protection={:?}", process_handle, address, size, protection);
-                let mut result = -1;
+                let mut result = u32::MAX;
 
                 match self.server.change_memory_protection(
-                    process_handle,
-                    address,
-                    size,
+                    req.process_handle,
+                    req.address,
+                    req.size as usize,
                     protection,
                 ) {
                     Ok(_) => {
@@ -581,35 +505,40 @@ where
                     }
                 }
 
-                let mut writer = Writer::new();
-                writer.write_i32(result);
-                writer.write_u32(0);
-                self.write_raw(writer.as_bytes()).await?;
-
-                Ok(())
+                self.respond(ChangeMemoryProtectionResponse {
+                    status: result,
+                    old_protection: 0, // TODO: implement returning old protection
+                })
+                .await
             }
             defs::Command::GETOPTIONS => {
                 let options = self.server.get_options()?;
 
-                let mut writer = Writer::new();
+                self.respond(GetOptionsResponse {
+                    options: options
+                        .into_iter()
+                        .map(|option| {
+                            let opt_value = self
+                                .server
+                                .get_option_value(option.option_id)
+                                .unwrap_or_default();
 
-                writer.write_u16(options.len() as u16);
-
-                for option in options {
-                    let opt_value = self
-                        .server
-                        .get_option_value(option.option_id)
-                        .unwrap_or_default();
-                    writer.write_bytes16(option.name.as_bytes());
-                    writer.write_bytes16(option.parent.unwrap_or_default().as_bytes());
-                    writer.write_bytes16(option.description.as_bytes());
-                    writer.write_bytes16(option.acceptable_values.unwrap_or_default().as_bytes());
-                    writer.write_bytes16(opt_value.as_str().as_bytes());
-                    writer.write_i32(option.option_type as i32);
-                }
-
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                            OptionResponse {
+                                name: option.name.into(),
+                                parent: option.parent.unwrap_or_default().into(),
+                                description: option.description.into(),
+                                acceptable_values: option
+                                    .acceptable_values
+                                    .unwrap_or_default()
+                                    .into(),
+                                opt_value: opt_value.into(),
+                                option_type: option.option_type as i32,
+                            }
+                        })
+                        .collect::<Vec<OptionResponse>>()
+                        .into(),
+                })
+                .await
             }
             defs::Command::GETOPTIONVALUE => todo!(),
             defs::Command::SETOPTIONVALUE => todo!(),
@@ -619,11 +548,11 @@ where
             defs::Command::PIPEWRITE => todo!(),
             defs::Command::GETCESERVERPATH => todo!(),
             defs::Command::ISANDROID => {
-                let mut writer = Writer::new();
                 let is_android = self.server.is_android();
-                writer.write_byte(if is_android { 1 } else { 0 });
-                self.write_raw(writer.as_bytes()).await?;
-                Ok(())
+                self.respond(IsAndroidResponse {
+                    is_android: if is_android { 1 } else { 0 },
+                })
+                .await
             }
             defs::Command::LOADMODULEEX => todo!(),
             defs::Command::SETCURRENTPATH => todo!(),
@@ -641,32 +570,34 @@ where
     }
 
     async fn process_next(&mut self, first: bool) -> anyhow::Result<()> {
-        let mut reader = Reader::new(self.read_raw::<4>().await?);
-        let handle = reader.read_handle()?;
+        let req: Process32NextRequest = self.read().await?;
 
-        let mut writer = Writer::new();
-
-        {
-            let snapshot_shared = self.server.get_tlhelp32_snapshot(handle)?;
+        let pe = {
+            let snapshot_shared = self.server.get_tlhelp32_snapshot(req.snapshot_handle)?;
             let mut snapshot = snapshot_shared.lock().unwrap();
 
             if first {
                 snapshot.processes.reset();
             }
 
-            if let Some(pe) = snapshot.processes.next() {
-                writer.write_i32(1);
-                writer.write_pid(pe.pid);
-                writer.write_bytes32(pe.name.as_bytes());
-            } else {
-                writer.write_i32(0);
-                writer.write_i32(0);
-                writer.write_i32(0);
-            }
-        }
+            snapshot.processes.next()
+        };
 
-        self.write_raw(writer.as_bytes()).await?;
-        Ok(())
+        let resp = if let Some(pe) = pe {
+            Process32NextResponse {
+                item: 1,
+                pid: pe.pid,
+                name: pe.name.into(),
+            }
+        } else {
+            Process32NextResponse {
+                item: 0,
+                pid: 0,
+                name: "".into(),
+            }
+        };
+
+        self.respond(resp).await
     }
 }
 
