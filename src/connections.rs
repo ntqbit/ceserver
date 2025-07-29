@@ -14,14 +14,14 @@ use crate::{
         CreateToolhelp32SnapshotRequest, CreateToolhelp32SnapshotThreadsResponse, Deserialize,
         FreeRequest, FreeResponse, GetAbiResponse, GetArchitectureRequest, GetArchitectureResponse,
         GetOptionsResponse, GetSymbolListFromFileRequest5, GetSymbolListFromFileRequest6,
-        GetSymbolListFromFileResponse, GetVersionResponse, IsAndroidResponse, ModuleResponse5,
-        ModuleResponse6, OpenProcessRequest, OpenProcessResponse, OptionResponse,
-        Process32NextRequest, Process32NextResponse, ReadProcessMemoryRequest,
-        ReadProcessMemoryResponse, RegionResponse, Serialize, SetConnectionNameRequest,
-        SetConnectionNameResponse, StartDebugRequest, StartDebugResponse, TerminateServerResponse,
-        VirtualQueryExFullRequest, VirtualQueryExFullResponse, VirtualQueryExRequest,
-        VirtualQueryExResponse, WaitForDebugEventRequest, WaitForDebugEventResponse,
-        WriteProcessMemoryRequest, WriteProcessMemoryResponse,
+        GetSymbolListFromFileResponse, GetVersionResponse, IsAndroidResponse, LoadModuleRequest,
+        LoadModuleResponse, ModuleResponse5, ModuleResponse6, OpenProcessRequest,
+        OpenProcessResponse, OptionResponse, Process32NextRequest, Process32NextResponse,
+        ReadProcessMemoryRequest, ReadProcessMemoryResponse, RegionResponse, Serialize,
+        SetConnectionNameRequest, SetConnectionNameResponse, StartDebugRequest, StartDebugResponse,
+        TerminateServerResponse, VirtualQueryExFullRequest, VirtualQueryExFullResponse,
+        VirtualQueryExRequest, VirtualQueryExResponse, WaitForDebugEventRequest,
+        WaitForDebugEventResponse, WriteProcessMemoryRequest, WriteProcessMemoryResponse,
     },
     server::{CeServer, VirtualQueryExFullFlags},
 };
@@ -386,7 +386,15 @@ where
 
                 self.respond(CreateThreadResponse { thread_handle }).await
             }
-            defs::Command::LOADMODULE => todo!(),
+            defs::Command::LOADMODULE => {
+                let req: LoadModuleRequest = self.read().await?;
+                let modulepath = String::from_utf8(req.module_path.into_inner())?;
+                log::debug!("Module path: {}", modulepath);
+
+                // TODO: implement
+
+                self.respond(LoadModuleResponse { result: 0 }).await
+            }
             defs::Command::SPEEDHACK_SETSPEED => todo!(),
             defs::Command::VIRTUALQUERYEXFULL => {
                 let req: VirtualQueryExFullRequest = self.read().await?;

@@ -851,3 +851,30 @@ impl Serialize for RegionResponse {
         Ok(())
     }
 }
+
+#[derive(Debug)]
+pub struct LoadModuleRequest {
+    pub process_handle: CeHandle,
+    pub module_path: Bytes32,
+}
+
+impl Deserialize for LoadModuleRequest {
+    async fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, D::Error> {
+        Ok(Self {
+            process_handle: <CeHandle as Deserialize>::deserialize(deserializer).await?,
+            module_path: <Bytes32 as Deserialize>::deserialize(deserializer).await?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct LoadModuleResponse {
+    pub result: u64,
+}
+
+impl Serialize for LoadModuleResponse {
+    fn serialize<S: Serializer>(&self, serializer: &mut S) -> anyhow::Result<()> {
+        self.result.serialize(serializer)?;
+        Ok(())
+    }
+}

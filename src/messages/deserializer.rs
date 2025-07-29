@@ -75,7 +75,9 @@ pub trait Deserialize: Sized {
     async fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, D::Error>;
 }
 
-pub async fn deserialize<T: Deserialize, R: AsyncRead + Unpin>(reader: R) -> Result<T, CeDeserializeError> {
+pub async fn deserialize<T: Deserialize, R: AsyncRead + Unpin>(
+    reader: R,
+) -> Result<T, CeDeserializeError> {
     let mut deserializer = CeDeserializer::new(reader);
     T::deserialize(&mut deserializer).await
 }
